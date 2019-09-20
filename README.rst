@@ -15,7 +15,9 @@ Building
 ========
 
 To build the ``bandit_sarif_formatter`` package, see the `Python Packaging Authority <https://www.pypa.io/en/latest/>`_'s instructions for
-`Packaging Python Projects <https://packaging.python.org/tutorials/packaging-projects/>`_, in particular the section "Generating distribution archives."
+`Packaging Python Projects`_, in particular the section "Generating distribution archives."
+
+.. _Packaging Python Projects: https://packaging.python.org/tutorials/packaging-projects/
 
 Briefly: run the following commands from the project root directory::
 
@@ -30,7 +32,7 @@ Publishing
 ==========
 
 To publish the ``bandit_sarif_formatter`` package, see the section "Uploading the distribution archives" and "Next steps" in
-`Packaging Python Projects <https://packaging.python.org/tutorials/packaging-projects>`_.
+`Packaging Python Projects`_.
 
 Briefly: log in to https://pypi.org with the **TODO** account, and then run the following commands from the project root directory::
 
