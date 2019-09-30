@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft.  All Rights Reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
 # TODO: baselining (see json.py)
 # TODO: Handle manager.agg_type (see json.py)
 # TODO: Run pylint or any tool that detects Py2/Py3 differences.
@@ -10,7 +13,8 @@ import urllib.parse as urlparse
 import sys
 
 from bandit.core import docs_utils
-import bandit_sarif_formatter.sarif_object_model as om
+import sarif_om as om
+from jschema_to_python.to_json import to_json
 
 LOG = logging.getLogger(__name__)
 
@@ -25,24 +29,26 @@ def report(manager, fileobj, sev_level, conf_level, lines=-1):
     :param conf_level: Filtering confidence level
     :param lines: Number of lines to report, -1 for all
     '''
-    log = om.SarifLog()
 
-    run = om.Run()
-    log.runs.append(run)
+    invocation = om.Invocation(
+        end_time_utc=datetime.datetime.utcnow().strftime(TS_FORMAT),
+        execution_successful=True
+    )
 
-    driver = om.ToolComponent()
-    driver.name = "Bandit"
+    run = om.Run(
+        tool=om.Tool(
+            driver=om.ToolComponent(
+                name="Bandit"
+            )
+        ),
+        invocations=[ invocation ])
 
-    tool = om.Tool()
-    tool.driver = driver
-
-    run.tool = tool
-
-    invocation = om.Invocation()
-    run.invocations.append(invocation)
-
-    invocation.endTimeUtc = datetime.datetime.utcnow().strftime(TS_FORMAT)
-    invocation.executionSuccessful = True
+    log = om.SarifLog(
+        version='2.1.0',
+        runs=[
+            run
+        ]
+    )
 
     skips = manager.get_skipped()
     add_skipped_file_notifications(skips, invocation)
@@ -56,8 +62,7 @@ def report(manager, fileobj, sev_level, conf_level, lines=-1):
         "metrics": manager.metrics.data
     }
 
-    log = del_none(log)
-    serializedLog = toJSON(log)
+    serializedLog = to_json(log)
 
     with fileobj:
         fileobj.write(serializedLog)
@@ -69,111 +74,102 @@ def add_skipped_file_notifications(skips, invocation):
     if skips is None or len(skips) == 0:
         return
 
-    if invocation.toolConfigurationNotifications is None:
-        invocation.toolConfigurationNotifications = []
+    if invocation.tool_configuration_notifications is None:
+        invocation.tool_configuration_notifications = []
 
     for skip in skips:
         (file_name, reason) = skip
 
-        message = om.Message()
-        message.text = reason
+        notification = om.Notification(
+            level="error",
+            message=om.Message(
+                text = reason
+            ),
+            locations=[
+                om.Location(
+                    physical_location=om.PhysicalLocation(
+                        artifact_location=om.ArtifactLocation(
+                            uri=to_uri(file_name)
+                        )
+                    )
+                )
+            ]
+        )
 
-        artifactLocation = om.ArtifactLocation()
-        artifactLocation.uri = to_uri(file_name)
-
-        physicalLocation = om.PhysicalLocation()
-        physicalLocation.artifactLocation = artifactLocation
-
-        location = om.Location()
-        location.physicalLocation = physicalLocation
-
-        notification = om.Notification()
-        notification.level = om.LEVEL_ERROR
-        notification.message = message
-        notification.locations = [location]
-
-        invocation.toolConfigurationNotifications.append(notification)
+        invocation.tool_configuration_notifications.append(notification)
 
 def add_results(issues, run):
     if run.results is None:
         run.results = []
 
     rules = {}
+    rule_indices = {}
     for issue in issues:
-        result = create_result(issue, rules)
+        result = create_result(issue, rules, rule_indices)
         run.results.append(result)
 
     if len(rules) > 0:
         run.tool.driver.rules = list(rules.values()) # TODO: Different in Python 2 (no "list")
 
-def create_result(issue, rules):
-    result = om.Result()
+def create_result(issue, rules, rule_indices):
     issue_dict = issue.as_dict()
 
-    result.ruleId = issue_dict["test_id"]
+    rule, rule_index = create_or_find_rule(issue_dict, rules, rule_indices)
 
-    result.level = level_from_severity(issue_dict["issue_severity"])
+    physical_location = om.PhysicalLocation(
+        artifact_location=om.ArtifactLocation(
+            uri=to_uri(issue_dict["filename"])
+        )
+    )
 
-    message = om.Message()
-    message.text = issue_dict["issue_text"]
-    result.message = message
+    add_region_and_context_region(physical_location, issue_dict["line_number"], issue_dict["code"])
 
-    artifactLocation = om.ArtifactLocation()
-    artifactLocation.uri = to_uri(issue_dict["filename"])
-
-    physicalLocation = om.PhysicalLocation()
-    physicalLocation.artifactLocation = artifactLocation
-
-    add_region_and_context_region(physicalLocation, issue_dict["line_number"], issue_dict["code"])
-
-    rule = create_or_find_rule(issue_dict, rules)
-    result.ruleId = rule.id
-    result.ruleIndex = rule.index
-
-    location = om.Location()
-    location.physicalLocation = physicalLocation
-
-    result.locations = [location]
-
-    result.properties = {
-        "issue_confidence": issue_dict["issue_confidence"],
-        "issue_severity": issue_dict["issue_severity"]
-    }
-
-    return result
+    return om.Result(
+        rule_id=rule.id,
+        rule_index=rule_index,
+        message=om.Message(
+            text=issue_dict["issue_text"]
+        ),
+        level=level_from_severity(issue_dict["issue_severity"]),
+        locations=[
+            om.Location(
+                physical_location=physical_location
+            )
+        ],
+        properties={
+            "issue_confidence": issue_dict["issue_confidence"],
+            "issue_severity": issue_dict["issue_severity"]
+        }
+    )
 
 def level_from_severity(severity):
     if severity == "HIGH":
-        return om.LEVEL_ERROR
+        return "error"
     elif severity == "MEDIUM":
-        return om.LEVEL_WARNING
+        return "warning"
     elif severity == "LOW":
-        return om.LEVEL_NOTE
+        return "note"
     else:
-        return om.LEVEL_WARNING
+        return "warning"
 
-def add_region_and_context_region(physicalLocation, line_number, code):
-    region = om.Region()
-    region.startLine = line_number
-
+def add_region_and_context_region(physical_location, line_number, code):
     first_line_number, snippet_lines = parse_code(code)
     snippet_line = snippet_lines[line_number - first_line_number]
 
-    snippet = om.ArtifactContent()
-    snippet.text = snippet_line
-    region.snippet = snippet
+    physical_location.region = om.Region(
+        start_line=line_number,
+        snippet=om.ArtifactContent(
+            text=snippet_line
+        )
+    )
 
-    physicalLocation.region = region
-
-    context_region = om.Region()
-    context_region.startLine = first_line_number
-    context_region.endLine = first_line_number + len(snippet_lines) - 1
-
-    context_snippet = om.ArtifactContent()
-    context_snippet.text = "".join(snippet_lines)
-    context_region.snippet = context_snippet
-
-    physicalLocation.contextRegion = context_region
+    physical_location.context_region = om.Region(
+        start_line = first_line_number,
+        end_line = first_line_number + len(snippet_lines) - 1,
+        snippet=om.ArtifactContent(
+            text = "".join(snippet_lines)
+        )
+    )
 
 def parse_code(code):
     code_lines = code.split('\n')
@@ -204,18 +200,21 @@ def parse_code(code):
 
     return first_line_number, snippet_lines
 
-def create_or_find_rule(issue_dict, rules):
-    ruleId = issue_dict["test_id"]
-    if ruleId in rules:
-        return rules[ruleId]
+def create_or_find_rule(issue_dict, rules, rule_indices):
+    rule_id = issue_dict["test_id"]
+    if rule_id in rules:
+        return rules[rule_id], rule_indices[rule_id]
 
-    rule = om.ReportingDescriptor()
-    rule.index = len(rules)
-    rule.id = ruleId
-    rule.name = issue_dict["test_name"]
-    rule.helpUri = docs_utils.get_url(ruleId)
-    rules[ruleId] = rule
-    return rule
+    rule = om.ReportingDescriptor(
+        id=rule_id,
+        name=issue_dict["test_name"],
+        help_uri=docs_utils.get_url(rule_id)
+    )
+
+    index = len(rules)
+    rules[rule_id] = rule
+    rule_indices[rule_id] = index
+    return rule, index
 
 def to_uri(file_path):
     pure_path = pathlib.PurePath(file_path)
@@ -224,33 +223,3 @@ def to_uri(file_path):
     else:
         posix_path = pure_path.as_posix()  # Replace backslashes with slashes.
         return urlparse.quote(posix_path)  # %-encode special characters.
-
-def del_none(obj):
-    """
-    Delete properties with the value ``None`` in an object, recursively, and
-    return the modified object.
-
-    Based on:
-    https://stackoverflow.com/questions/4255400/exclude-empty-null-values-from-json-serialization
-    https://stackoverflow.com/questions/1251692/how-to-enumerate-an-objects-properties-in-python
-    """
-
-    # Batch up the properties to remove, and remove them at the end, because we
-    # can't alter the object's __dict__ while we're iterating over it.
-    propertiesToRemove = []
-    for property, value in vars(obj).items():
-        if value is None:
-            propertiesToRemove.append(property)
-        elif hasattr(value, "__dict__"):
-            del_none(value)
-        elif isinstance(value, (list, tuple)):
-            for item in value:
-                del_none(item)
-
-    for propertyToRemove in propertiesToRemove:
-        del obj.__dict__[propertyToRemove]
-
-    return obj
-
-def toJSON(obj):
-    return json.dumps(obj, indent=2, default=lambda x: getattr(x, '__dict__', str(x)))
