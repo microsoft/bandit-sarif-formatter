@@ -30,25 +30,31 @@ def report(manager, fileobj, sev_level, conf_level, lines=-1):
     :param lines: Number of lines to report, -1 for all
     '''
 
-    invocation = om.Invocation(
-        end_time_utc=datetime.datetime.utcnow().strftime(TS_FORMAT),
-        execution_successful=True
-    )
-
-    run = om.Run(
-        tool=om.Tool(
-            driver=om.ToolComponent(
-                name="Bandit"
-            )
-        ),
-        invocations=[ invocation ])
-
     log = om.SarifLog(
+        schema_uri="https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.4.json",
         version='2.1.0',
         runs=[
-            run
+            om.Run(
+                tool=om.Tool(
+                    driver=om.ToolComponent(
+                        name="Bandit"
+                    )
+                ),
+                invocations=[
+                    om.Invocation(
+                        end_time_utc=datetime.datetime.utcnow().strftime(TS_FORMAT),
+                        execution_successful=True
+                    )
+                ],
+                properties={
+                    "metrics": manager.metrics.data
+                }
+            )
         ]
     )
+
+    run = log.runs[0]
+    invocation = run.invocations[0]
 
     skips = manager.get_skipped()
     add_skipped_file_notifications(skips, invocation)
@@ -57,10 +63,6 @@ def report(manager, fileobj, sev_level, conf_level, lines=-1):
                                     conf_level=conf_level)
 
     add_results(issues, run)
-
-    run.properties = {
-        "metrics": manager.metrics.data
-    }
 
     serializedLog = to_json(log)
 
