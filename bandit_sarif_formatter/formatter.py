@@ -8,17 +8,23 @@
 import datetime
 import json
 import logging
+import os
 import pathlib
-import urllib.parse as urlparse
 import sys
+import urllib.parse as urlparse
+import uuid
 
-from bandit.core import docs_utils
 import sarif_om as om
+from bandit.core import docs_utils
 from jschema_to_python.to_json import to_json
 
 LOG = logging.getLogger(__name__)
 
 TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
+CWE_DATA_FILE = os.path.join(SCRIPT_PATH, "CWE_4.12.json")
+CWE_DATA_DICT = json.loads(open(CWE_DATA_FILE, "r").read())
 
 
 def report(manager, fileobj, sev_level, conf_level, lines=-1):
@@ -31,12 +37,27 @@ def report(manager, fileobj, sev_level, conf_level, lines=-1):
     :param lines: Number of lines to report, -1 for all
     """
 
+    run_uuid = uuid.uuid4()
+    issues = manager.get_issue_list(sev_level=sev_level, conf_level=conf_level)
+    results = []
+    rules = {}
+    rule_indices = {}
+    for issue in issues:
+        result = create_result(issue, rules, rule_indices, run_uuid)
+        results.append(result)
+
     log = om.SarifLog(
         schema_uri="https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.4.json",
         version="2.1.0",
         runs=[
             om.Run(
-                tool=om.Tool(driver=om.ToolComponent(name="Bandit")),
+                taxonomies=create_taxonomies_element(results, run_uuid),
+                tool=om.Tool(
+                    driver=om.ToolComponent(
+                        name="Bandit",
+                        supported_taxonomies=[{"name": "CWE", "guid": run_uuid}],
+                    )
+                ),
                 invocations=[
                     om.Invocation(
                         end_time_utc=datetime.datetime.utcnow().strftime(TS_FORMAT),
@@ -54,9 +75,15 @@ def report(manager, fileobj, sev_level, conf_level, lines=-1):
     skips = manager.get_skipped()
     add_skipped_file_notifications(skips, invocation)
 
-    issues = manager.get_issue_list(sev_level=sev_level, conf_level=conf_level)
+    if run.results is None:
+        run.results = []
 
-    add_results(issues, run)
+    run.results += results
+
+    if len(rules) > 0:
+        run.tool.driver.rules = list(
+            add_relationship_to_rules(rules, results, run_uuid).values()
+        )  # TODO: Different in Python 2 (no "list")
 
     serializedLog = to_json(log)
 
@@ -92,23 +119,65 @@ def add_skipped_file_notifications(skips, invocation):
         invocation.tool_configuration_notifications.append(notification)
 
 
-def add_results(issues, run):
-    if run.results is None:
-        run.results = []
-
-    rules = {}
-    rule_indices = {}
-    for issue in issues:
-        result = create_result(issue, rules, rule_indices)
-        run.results.append(result)
-
-    if len(rules) > 0:
-        run.tool.driver.rules = list(
-            rules.values()
-        )  # TODO: Different in Python 2 (no "list")
+def find_in_cwe(cweid):
+    cwe_finding = None
+    for weakness in CWE_DATA_DICT["weaknesses"]:
+        if weakness["cweid"] == cweid:
+            cwe_finding = weakness
+            break
+    return cwe_finding
 
 
-def create_result(issue, rules, rule_indices):
+def create_taxa_element(cweid, run_uuid):
+    return {
+        "id": str(cweid),
+        "guid": run_uuid,
+        "toolComponent": {"name": "CWE", "guid": uuid.uuid4()},
+    }
+
+
+def extend_taxa_element(taxa):
+    result = taxa.copy()
+    cwe_finding = find_in_cwe(taxa["id"])
+    result["name"] = cwe_finding["name"]
+    result["shortDescription"] = {"text": cwe_finding["description"]}
+    result["defaultConfiguration"] = {"level": cwe_finding["severity"]}
+    return result
+
+
+def create_taxonomies_element(results, run_uuid):
+    return {
+        "name": CWE_DATA_DICT["name"],
+        "version": CWE_DATA_DICT["version"],
+        "releaseDateUtc": CWE_DATA_DICT["date"],
+        "guid": run_uuid,
+        "informationUri": CWE_DATA_DICT["informationUri"],
+        "downloadUri": CWE_DATA_DICT["downloadUri"],
+        "organization": CWE_DATA_DICT["organization"],
+        "shortDescription": {"text": CWE_DATA_DICT["shortDescription"]},
+        "taxa": [extend_taxa_element(result.taxa) for result in results],
+    }
+
+
+def add_relationship_to_rules(rules, results, run_uuid):
+    for rule in rules:
+        for result in results:
+            if result.rule_id == rule:
+                rules[rule].relationships = {
+                    "target": {
+                        "id": result.taxa["id"],
+                        "guid": run_uuid,
+                        "toolComponent": {
+                            "name": "CWE",
+                            "guid": result.taxa["toolComponent"]["guid"],
+                        },
+                    },
+                    "kinds": ["superset"],
+                }
+    return rules
+
+
+def create_result(issue, rules, rule_indices, run_uuid):
     issue_dict = issue.as_dict()
 
     rule, rule_index = create_or_find_rule(issue_dict, rules, rule_indices)
@@ -127,11 +196,23 @@ def create_result(issue, rules, rule_indices):
         message=om.Message(text=issue_dict["issue_text"]),
         level=level_from_severity(issue_dict["issue_severity"]),
         locations=[om.Location(physical_location=physical_location)],
+        taxa=create_taxa_element(issue_dict["issue_cwe"]["id"], run_uuid),
         properties={
             "issue_confidence": issue_dict["issue_confidence"],
             "issue_severity": issue_dict["issue_severity"],
         },
     )
+
+
+def filter_taxa_in_result(results):
+    tmp = results.copy()
+    for r in tmp:
+        print(r.taxa)
+    for result in tmp:
+        del result.taxa["name"]
+        del result.taxa["shortDescription"]
+        del result.taxa["defaultConfiguration"]
+    return tmp
 
 
 def level_from_severity(severity):

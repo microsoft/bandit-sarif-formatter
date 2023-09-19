@@ -53,6 +53,11 @@ To generate SARIF output from Bandit, run the command::
 
     bandit --format sarif [targets [targets ...]] --output out.sarif
 
+CWE Extension
+=============
+
+Added the Common Weakness Enumeration (CWE) taxonomy. The short and long description for the CWEs are retrieved from a JSON file which is a slimmed down version of the official comprehensive CWE XML from MITRE. The JSON contains information about all CWEs.
+
 Contributing
 ============
 
