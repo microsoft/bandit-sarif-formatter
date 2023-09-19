@@ -204,17 +204,6 @@ def create_result(issue, rules, rule_indices, run_uuid):
     )
 
 
-def filter_taxa_in_result(results):
-    tmp = results.copy()
-    for r in tmp:
-        print(r.taxa)
-    for result in tmp:
-        del result.taxa["name"]
-        del result.taxa["shortDescription"]
-        del result.taxa["defaultConfiguration"]
-    return tmp
-
-
 def level_from_severity(severity):
     if severity == "HIGH":
         return "error"
